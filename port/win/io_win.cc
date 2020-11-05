@@ -7,14 +7,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#if defined(OS_WIN)
+
 #include "port/win/io_win.h"
 
 #include "monitoring/iostats_context_imp.h"
+#include "test_util/sync_point.h"
 #include "util/aligned_buffer.h"
 #include "util/coding.h"
-#include "util/sync_point.h"
 
-namespace rocksdb {
+namespace ROCKSDB_NAMESPACE {
 namespace port {
 
 /*
@@ -175,60 +177,18 @@ Status ftruncate(const std::string& filename, HANDLE hFile,
   return status;
 }
 
-size_t GetUniqueIdFromFile(HANDLE hFile, char* id, size_t max_size) {
-
-  if (max_size < kMaxVarint64Length * 3) {
-    return 0;
-  }
-#if (_WIN32_WINNT == _WIN32_WINNT_VISTA)
-  // MINGGW as defined by CMake file.
-  // yuslepukhin: I hate the guts of the above macros.
-  // This impl does not guarantee uniqueness everywhere
-  // is reasonably good
-  BY_HANDLE_FILE_INFORMATION FileInfo;
-
-  BOOL result = GetFileInformationByHandle(hFile, &FileInfo);
-
-  TEST_SYNC_POINT_CALLBACK("GetUniqueIdFromFile:FS_IOC_GETVERSION", &result);
-
-  if (!result) {
-    return 0;
-  }
-
-  char* rid = id;
-  rid = EncodeVarint64(rid, uint64_t(FileInfo.dwVolumeSerialNumber));
-  rid = EncodeVarint64(rid, uint64_t(FileInfo.nFileIndexHigh));
-  rid = EncodeVarint64(rid, uint64_t(FileInfo.nFileIndexLow));
-
-  assert(rid >= id);
-  return static_cast<size_t>(rid - id);
-#else
-  FILE_ID_INFO FileInfo;
-  BOOL result = GetFileInformationByHandleEx(hFile, FileIdInfo, &FileInfo,
-    sizeof(FileInfo));
-
-  TEST_SYNC_POINT_CALLBACK("GetUniqueIdFromFile:FS_IOC_GETVERSION", &result);
-
-  if (!result) {
-    return 0;
-  }
-
-  static_assert(sizeof(uint64_t) == sizeof(FileInfo.VolumeSerialNumber),
-    "Wrong sizeof expectations");
-  // FileId.Identifier is an array of 16 BYTEs, we encode them as two uint64_t
-  static_assert(sizeof(uint64_t) * 2 == sizeof(FileInfo.FileId.Identifier),
-    "Wrong sizeof expectations");
-
-  char* rid = id;
-  rid = EncodeVarint64(rid, uint64_t(FileInfo.VolumeSerialNumber));
-  uint64_t* file_id = reinterpret_cast<uint64_t*>(&FileInfo.FileId.Identifier[0]);
-  rid = EncodeVarint64(rid, *file_id);
-  ++file_id;
-  rid = EncodeVarint64(rid, *file_id);
-
-  assert(rid >= id);
-  return static_cast<size_t>(rid - id);
-#endif
+size_t GetUniqueIdFromFile(HANDLE /*hFile*/, char* /*id*/,
+                           size_t /*max_size*/) {
+  // Returning 0 is safe as it causes the table reader to generate a unique ID.
+  // This is suboptimal for performance as it prevents multiple table readers
+  // for the same file from sharing cached blocks. For example, if users have
+  // a low value for `max_open_files`, there can be many table readers opened
+  // for the same file.
+  //
+  // TODO: this is a temporarily solution as it is safe but not optimal for
+  // performance. For more details see discussion in
+  // https://github.com/facebook/rocksdb/pull/5844.
+  return 0;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -684,8 +644,8 @@ Status WinSequentialFile::Skip(uint64_t n) {
   BOOL ret = SetFilePointerEx(hFile_, li, NULL, FILE_CURRENT);
   if (ret == FALSE) {
     auto lastError = GetLastError();
-    return IOErrorFromWindowsError("Skip SetFilePointerEx():" + filename_, 
-      lastError);
+    return IOErrorFromWindowsError("Skip SetFilePointerEx():" + filename_,
+                                   lastError);
   }
   return Status::OK();
 }
@@ -809,8 +769,8 @@ Status WinWritableImpl::AppendImpl(const Slice& data) {
   Status s;
 
   if (data.size() > std::numeric_limits<DWORD>::max()) {
-    return Status::InvalidArgument("data is too long for a single write" + 
-      file_data_->GetName());
+    return Status::InvalidArgument("data is too long for a single write" +
+                                   file_data_->GetName());
   }
 
   size_t bytes_written = 0; // out param
@@ -847,8 +807,8 @@ Status WinWritableImpl::AppendImpl(const Slice& data) {
       // is sector aligned
       next_write_offset_ += bytes_written;
     } else {
-      s = Status::IOError("Failed to write all bytes: " + 
-        file_data_->GetName());
+      s = Status::IOError("Failed to write all bytes: " +
+                          file_data_->GetName());
     }
   }
 
@@ -1067,7 +1027,12 @@ Status WinRandomRWFile::Close() {
 //////////////////////////////////////////////////////////////////////////
 /// WinMemoryMappedBufer
 WinMemoryMappedBuffer::~WinMemoryMappedBuffer() {
-  BOOL ret = FALSE;
+  BOOL ret
+#if defined(_MSC_VER)
+    = FALSE;
+#else
+    __attribute__((__unused__));
+#endif
   if (base_ != nullptr) {
     ret = ::UnmapViewOfFile(base_);
     assert(ret);
@@ -1103,4 +1068,6 @@ WinFileLock::~WinFileLock() {
 }
 
 }
-}
+}  // namespace ROCKSDB_NAMESPACE
+
+#endif

@@ -8,18 +8,14 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 #include "db/dbformat.h"
 
-#ifndef __STDC_FORMAT_MACROS
-#define __STDC_FORMAT_MACROS
-#endif
-
-#include <inttypes.h>
 #include <stdio.h>
+#include <cinttypes>
 #include "monitoring/perf_context_imp.h"
 #include "port/port.h"
 #include "util/coding.h"
 #include "util/string_util.h"
 
-namespace rocksdb {
+namespace ROCKSDB_NAMESPACE {
 
 // kValueTypeForSeek defines the ValueType that should be passed when
 // constructing a ParsedInternalKey object for seeking to a particular
@@ -27,14 +23,8 @@ namespace rocksdb {
 // and the value type is embedded as the low 8 bits in the sequence
 // number in internal keys, we need to use the highest-numbered
 // ValueType, not the lowest).
-const ValueType kValueTypeForSeek = kTypeBlobIndex;
+const ValueType kValueTypeForSeek = kTypeDeletionWithTimestamp;
 const ValueType kValueTypeForSeekForPrev = kTypeDeletion;
-
-uint64_t PackSequenceAndType(uint64_t seq, ValueType t) {
-  assert(seq <= kMaxSequenceNumber);
-  assert(IsExtendedValueType(t));
-  return (seq << 8) | t;
-}
 
 EntryType GetEntryType(ValueType value_type) {
   switch (value_type) {
@@ -42,6 +32,8 @@ EntryType GetEntryType(ValueType value_type) {
       return kEntryPut;
     case kTypeDeletion:
       return kEntryDelete;
+    case kTypeDeletionWithTimestamp:
+      return kEntryDeleteWithTimestamp;
     case kTypeSingleDeletion:
       return kEntrySingleDelete;
     case kTypeMerge:
@@ -57,7 +49,8 @@ EntryType GetEntryType(ValueType value_type) {
 
 bool ParseFullKey(const Slice& internal_key, FullKey* fkey) {
   ParsedInternalKey ikey;
-  if (!ParseInternalKey(internal_key, &ikey)) {
+  if (!ParseInternalKey(internal_key, &ikey, false /*log_err_key */)
+           .ok()) {  // TODO
     return false;
   }
   fkey->user_key = ikey.user_key;
@@ -66,16 +59,17 @@ bool ParseFullKey(const Slice& internal_key, FullKey* fkey) {
   return true;
 }
 
-void UnPackSequenceAndType(uint64_t packed, uint64_t* seq, ValueType* t) {
-  *seq = packed >> 8;
-  *t = static_cast<ValueType>(packed & 0xff);
-
-  assert(*seq <= kMaxSequenceNumber);
-  assert(IsExtendedValueType(*t));
-}
-
 void AppendInternalKey(std::string* result, const ParsedInternalKey& key) {
   result->append(key.user_key.data(), key.user_key.size());
+  PutFixed64(result, PackSequenceAndType(key.sequence, key.type));
+}
+
+void AppendInternalKeyWithDifferentTimestamp(std::string* result,
+                                             const ParsedInternalKey& key,
+                                             const Slice& ts) {
+  assert(key.user_key.size() >= ts.size());
+  result->append(key.user_key.data(), key.user_key.size() - ts.size());
+  result->append(ts.data(), ts.size());
   PutFixed64(result, PackSequenceAndType(key.sequence, key.type));
 }
 
@@ -84,12 +78,18 @@ void AppendInternalKeyFooter(std::string* result, SequenceNumber s,
   PutFixed64(result, PackSequenceAndType(s, t));
 }
 
-std::string ParsedInternalKey::DebugString(bool hex) const {
+std::string ParsedInternalKey::DebugString(bool log_err_key, bool hex) const {
+  std::string result = "'";
+  if (log_err_key) {
+    result += user_key.ToString(hex);
+  } else {
+    result += "<redacted>";
+  }
+
   char buf[50];
   snprintf(buf, sizeof(buf), "' seq:%" PRIu64 ", type:%d", sequence,
            static_cast<int>(type));
-  std::string result = "'";
-  result += user_key.ToString(hex);
+
   result += buf;
   return result;
 }
@@ -97,8 +97,8 @@ std::string ParsedInternalKey::DebugString(bool hex) const {
 std::string InternalKey::DebugString(bool hex) const {
   std::string result;
   ParsedInternalKey parsed;
-  if (ParseInternalKey(rep_, &parsed)) {
-    result = parsed.DebugString(hex);
+  if (ParseInternalKey(rep_, &parsed, false /* log_err_key */).ok()) {
+    result = parsed.DebugString(true /* log_err_key */, hex);  // TODO
   } else {
     result = "(bad)";
     result.append(EscapeString(rep_));
@@ -106,7 +106,12 @@ std::string InternalKey::DebugString(bool hex) const {
   return result;
 }
 
-const char* InternalKeyComparator::Name() const { return name_.c_str(); }
+const char* InternalKeyComparator::Name() const {
+  if (name_.empty()) {
+    return "rocksdb.anonymous.InternalKeyComparator";
+  }
+  return name_.c_str();
+}
 
 int InternalKeyComparator::Compare(const ParsedInternalKey& a,
                                    const ParsedInternalKey& b) const {
@@ -163,9 +168,11 @@ void InternalKeyComparator::FindShortSuccessor(std::string* key) const {
   }
 }
 
-LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s) {
+LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s,
+                     const Slice* ts) {
   size_t usize = _user_key.size();
-  size_t needed = usize + 13;  // A conservative estimate
+  size_t ts_sz = (nullptr == ts) ? 0 : ts->size();
+  size_t needed = usize + ts_sz + 13;  // A conservative estimate
   char* dst;
   if (needed <= sizeof(space_)) {
     dst = space_;
@@ -174,10 +181,14 @@ LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s) {
   }
   start_ = dst;
   // NOTE: We don't support users keys of more than 2GB :)
-  dst = EncodeVarint32(dst, static_cast<uint32_t>(usize + 8));
+  dst = EncodeVarint32(dst, static_cast<uint32_t>(usize + ts_sz + 8));
   kstart_ = dst;
   memcpy(dst, _user_key.data(), usize);
   dst += usize;
+  if (nullptr != ts) {
+    memcpy(dst, ts->data(), ts_sz);
+    dst += ts_sz;
+  }
   EncodeFixed64(dst, PackSequenceAndType(s, kValueTypeForSeek));
   dst += 8;
   end_ = dst;
@@ -192,4 +203,4 @@ void IterKey::EnlargeBuffer(size_t key_size) {
   buf_ = new char[key_size];
   buf_size_ = key_size;
 }
-}  // namespace rocksdb
+}  // namespace ROCKSDB_NAMESPACE

@@ -12,13 +12,12 @@
 #define ROCKSDB_HDFS_FILE_C
 
 #include <stdio.h>
-#include <sys/time.h>
 #include <time.h>
 #include <algorithm>
 #include <iostream>
 #include <sstream>
+#include "logging/logging.h"
 #include "rocksdb/status.h"
-#include "util/logging.h"
 #include "util/string_util.h"
 
 #define HDFS_EXISTS 0
@@ -31,7 +30,7 @@
 // will reside on the same HDFS cluster.
 //
 
-namespace rocksdb {
+namespace ROCKSDB_NAMESPACE {
 
 namespace {
 
@@ -124,8 +123,9 @@ class HdfsReadableFile : virtual public SequentialFile,
     Status s;
     ROCKS_LOG_DEBUG(mylog, "[hdfs] HdfsReadableFile preading %s\n",
                     filename_.c_str());
-    ssize_t bytes_read = hdfsPread(fileSys_, hfile_, offset,
-                                   (void*)scratch, (tSize)n);
+    tSize bytes_read =
+        hdfsPread(fileSys_, hfile_, offset, static_cast<void*>(scratch),
+                  static_cast<tSize>(n));
     ROCKS_LOG_DEBUG(mylog, "[hdfs] HdfsReadableFile pread %s\n",
                     filename_.c_str());
     *result = Slice(scratch, (bytes_read < 0) ? 0 : bytes_read);
@@ -420,7 +420,7 @@ Status HdfsEnv::NewRandomAccessFile(const std::string& fname,
 // create a new file for writing
 Status HdfsEnv::NewWritableFile(const std::string& fname,
                                 std::unique_ptr<WritableFile>* result,
-                                const EnvOptions& /*options*/) {
+                                const EnvOptions& options) {
   result->reset();
   Status s;
   HdfsWritableFile* f = new HdfsWritableFile(fileSys_, fname, options);
@@ -590,6 +590,11 @@ Status HdfsEnv::UnlockFile(FileLock* /*lock*/) { return Status::OK(); }
 
 Status HdfsEnv::NewLogger(const std::string& fname,
                           std::shared_ptr<Logger>* result) {
+  // EnvOptions is used exclusively for its `strict_bytes_per_sync` value. That
+  // option is only intended for WAL/flush/compaction writes, so turn it off in
+  // the logger.
+  EnvOptions options;
+  options.strict_bytes_per_sync = false;
   HdfsWritableFile* f = new HdfsWritableFile(fileSys_, fname, options);
   if (f == nullptr || !f->isValid()) {
     delete f;
@@ -604,19 +609,31 @@ Status HdfsEnv::NewLogger(const std::string& fname,
   return Status::OK();
 }
 
+Status HdfsEnv::IsDirectory(const std::string& path, bool* is_dir) {
+  hdfsFileInfo* pFileInfo = hdfsGetPathInfo(fileSys_, path.c_str());
+  if (pFileInfo != nullptr) {
+    if (is_dir != nullptr) {
+      *is_dir = (pFileInfo->mKind == kObjectKindDirectory);
+    }
+    hdfsFreeFileInfo(pFileInfo, 1);
+    return Status::OK();
+  }
+  return IOError(path, errno);
+}
+
 // The factory method for creating an HDFS Env
 Status NewHdfsEnv(Env** hdfs_env, const std::string& fsname) {
   *hdfs_env = new HdfsEnv(fsname);
   return Status::OK();
 }
-}  // namespace rocksdb
+}  // namespace ROCKSDB_NAMESPACE
 
 #endif // ROCKSDB_HDFS_FILE_C
 
 #else // USE_HDFS
 
 // dummy placeholders used when HDFS is not available
-namespace rocksdb {
+namespace ROCKSDB_NAMESPACE {
 Status HdfsEnv::NewSequentialFile(const std::string& /*fname*/,
                                   std::unique_ptr<SequentialFile>* /*result*/,
                                   const EnvOptions& /*options*/) {
@@ -626,6 +643,6 @@ Status HdfsEnv::NewSequentialFile(const std::string& /*fname*/,
  Status NewHdfsEnv(Env** /*hdfs_env*/, const std::string& /*fsname*/) {
    return Status::NotSupported("Not compiled with hdfs support");
  }
-}
+ }  // namespace ROCKSDB_NAMESPACE
 
 #endif

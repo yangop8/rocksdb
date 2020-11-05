@@ -7,6 +7,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#if !defined(OS_WIN)
+
 #include "port/port_posix.h"
 
 #include <assert.h>
@@ -18,13 +20,12 @@
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <cstdlib>
-#include "util/logging.h"
 
-namespace rocksdb {
+namespace ROCKSDB_NAMESPACE {
 
 // We want to give users opportunity to default all the mutexes to adaptive if
 // not specified otherwise. This enables a quick way to conduct various
@@ -192,7 +193,8 @@ int GetMaxOpenFiles() {
     return -1;
   }
   // protect against overflow
-  if (no_files_limit.rlim_cur >= std::numeric_limits<int>::max()) {
+  if (static_cast<uintmax_t>(no_files_limit.rlim_cur) >=
+      static_cast<uintmax_t>(std::numeric_limits<int>::max())) {
     return std::numeric_limits<int>::max();
   }
   return static_cast<int>(no_files_limit.rlim_cur);
@@ -216,6 +218,49 @@ void cacheline_aligned_free(void *memblock) {
   free(memblock);
 }
 
+static size_t GetPageSize() {
+#if defined(OS_LINUX) || defined(_SC_PAGESIZE)
+  long v = sysconf(_SC_PAGESIZE);
+  if (v >= 1024) {
+    return static_cast<size_t>(v);
+  }
+#endif
+  // Default assume 4KB
+  return 4U * 1024U;
+}
+
+const size_t kPageSize = GetPageSize();
+
+void SetCpuPriority(ThreadId id, CpuPriority priority) {
+#ifdef OS_LINUX
+  sched_param param;
+  param.sched_priority = 0;
+  switch (priority) {
+    case CpuPriority::kHigh:
+      sched_setscheduler(id, SCHED_OTHER, &param);
+      setpriority(PRIO_PROCESS, id, -20);
+      break;
+    case CpuPriority::kNormal:
+      sched_setscheduler(id, SCHED_OTHER, &param);
+      setpriority(PRIO_PROCESS, id, 0);
+      break;
+    case CpuPriority::kLow:
+      sched_setscheduler(id, SCHED_OTHER, &param);
+      setpriority(PRIO_PROCESS, id, 19);
+      break;
+    case CpuPriority::kIdle:
+      sched_setscheduler(id, SCHED_IDLE, &param);
+      break;
+    default:
+      assert(false);
+  }
+#else
+  (void)id;
+  (void)priority;
+#endif
+}
 
 }  // namespace port
-}  // namespace rocksdb
+}  // namespace ROCKSDB_NAMESPACE
+
+#endif

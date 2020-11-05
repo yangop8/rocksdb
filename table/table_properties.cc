@@ -4,15 +4,16 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #include "rocksdb/table_properties.h"
+
 #include "port/port.h"
 #include "rocksdb/env.h"
 #include "rocksdb/iterator.h"
-#include "table/block.h"
+#include "table/block_based/block.h"
 #include "table/internal_iterator.h"
 #include "table/table_properties_internal.h"
 #include "util/string_util.h"
 
-namespace rocksdb {
+namespace ROCKSDB_NAMESPACE {
 
 const uint32_t TablePropertiesCollectorFactory::Context::kUnknownColumnFamily =
     port::kMaxInt32;
@@ -124,10 +125,11 @@ std::string TableProperties::ToString(
                  prop_delim, kv_delim);
 
   AppendProperty(result, "column family ID",
-                 column_family_id == rocksdb::TablePropertiesCollectorFactory::
-                                         Context::kUnknownColumnFamily
+                 column_family_id ==
+                         ROCKSDB_NAMESPACE::TablePropertiesCollectorFactory::
+                             Context::kUnknownColumnFamily
                      ? std::string("N/A")
-                     : rocksdb::ToString(column_family_id),
+                     : ROCKSDB_NAMESPACE::ToString(column_family_id),
                  prop_delim, kv_delim);
   AppendProperty(
       result, "column family name",
@@ -166,6 +168,11 @@ std::string TableProperties::ToString(
   AppendProperty(result, "file creation time", file_creation_time, prop_delim,
                  kv_delim);
 
+  // DB identity and DB session ID
+  AppendProperty(result, "DB identity", db_id, prop_delim, kv_delim);
+  AppendProperty(result, "DB session identity", db_session_id, prop_delim,
+                 kv_delim);
+
   return result;
 }
 
@@ -186,6 +193,11 @@ void TableProperties::Add(const TableProperties& tp) {
   num_range_deletions += tp.num_range_deletions;
 }
 
+const std::string TablePropertiesNames::kDbId = "rocksdb.creating.db.identity";
+const std::string TablePropertiesNames::kDbSessionId =
+    "rocksdb.creating.session.identity";
+const std::string TablePropertiesNames::kDbHostId =
+    "rocksdb.creating.host.identity";
 const std::string TablePropertiesNames::kDataSize  =
     "rocksdb.data.size";
 const std::string TablePropertiesNames::kIndexSize =
@@ -267,4 +279,4 @@ Status SeekToRangeDelBlock(InternalIterator* meta_iter, bool* is_found,
   return SeekToMetaBlock(meta_iter, kRangeDelBlock, is_found, block_handle);
 }
 
-}  // namespace rocksdb
+}  // namespace ROCKSDB_NAMESPACE

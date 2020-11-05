@@ -18,8 +18,8 @@ int main() {
 #include "db/write_batch_internal.h"
 #include "rocksdb/db.h"
 #include "rocksdb/types.h"
+#include "test_util/testutil.h"
 #include "util/gflags_compat.h"
-#include "util/testutil.h"
 
 // Run a thread to perform Put's.
 // Another thread uses GetUpdatesSince API to keep getting the updates.
@@ -27,7 +27,7 @@ int main() {
 // --num_inserts = the num of inserts the first thread should perform.
 // --wal_ttl = the wal ttl for the run.
 
-using namespace rocksdb;
+using namespace ROCKSDB_NAMESPACE;
 
 using GFLAGS_NAMESPACE::ParseCommandLineFlags;
 using GFLAGS_NAMESPACE::SetUsageMessage;
@@ -37,20 +37,14 @@ struct DataPumpThread {
   DB* db;  // Assumption DB is Open'ed already.
 };
 
-static std::string RandomString(Random* rnd, int len) {
-  std::string r;
-  test::RandomString(rnd, len, &r);
-  return r;
-}
-
 static void DataPumpThreadBody(void* arg) {
   DataPumpThread* t = reinterpret_cast<DataPumpThread*>(arg);
   DB* db = t->db;
   Random rnd(301);
   size_t i = 0;
   while (i++ < t->no_records) {
-    if (!db->Put(WriteOptions(), Slice(RandomString(&rnd, 500)),
-                 Slice(RandomString(&rnd, 500)))
+    if (!db->Put(WriteOptions(), Slice(rnd.RandomString(500)),
+                 Slice(rnd.RandomString(500)))
              .ok()) {
       fprintf(stderr, "Error in put\n");
       exit(1);
